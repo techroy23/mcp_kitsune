@@ -17,6 +17,8 @@
 # Usage:
 #   ./install.sh            # deploy + verify + optionally install skill
 #   ./install.sh --no-skill # skip the skill-file question (pure deploy)
+#   ./install.sh --bind 0.0.0.0   # bind host ports to all interfaces (default: 127.0.0.1)
+#   ./install.sh --bind 192.168.1.50  # bind to a specific LAN IP
 # =============================================================================
 set -euo pipefail
 
@@ -30,14 +32,30 @@ err()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; }
 
 # --- flags ------------------------------------------------------------------
 INSTALL_SKILL=1
-for arg in "$@"; do
-  case "$arg" in
-    --no-skill) INSTALL_SKILL=0 ;;
+BIND_IP_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-skill) INSTALL_SKILL=0; shift ;;
+    --bind)
+      # Value is the next arg. Requires --bind <ip> (space-separated).
+      if [ $# -ge 2 ]; then
+        BIND_IP_ARG="$2"
+        shift 2
+      else
+        err "--bind requires an IP value (e.g. --bind 0.0.0.0)"; exit 1
+      fi
+      ;;
+    --bind=*)
+      BIND_IP_ARG="${1#--bind=}"
+      shift
+      ;;
     -h|--help)
-      grep -E '^# Usage' -A4 "$0" | sed 's/^# \{0,1\}//'
+      grep -E '^# Usage' -A6 "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
-    *) err "unknown argument: $arg (see --help)"; exit 1 ;;
+    *)
+      err "unknown argument: $1 (see --help)"; exit 1
+      ;;
   esac
 done
 
@@ -95,6 +113,26 @@ if [ ! -f .env ]; then
   ok ".env created"
 else
   log ".env exists - reusing (no secrets wiped)"
+fi
+
+# --- 2b. bind IP ------------------------------------------------------------
+# --bind <ip> overrides BIND_IP for this run. Without it, use the .env/.env.example
+# value (default 127.0.0.1 = localhost only). Writes into .env so docker compose
+# picks it up. NOTE: an explicit --bind beats .env but does not permanently write
+# to .env unless you also set it there (keeps one-shot binds out of persisted config).
+if [ -n "$BIND_IP_ARG" ]; then
+  # Validate it looks like an IP (v4 or v6) before trusting it.
+  if echo "$BIND_IP_ARG" | grep -EqE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$|^([0-9a-fA-F:]+)$'; then
+    log "binding host ports to $BIND_IP_ARG (from --bind)"
+    # Export so compose uses it in this process, even if .env is unchanged.
+    export BIND_IP="$BIND_IP_ARG"
+    ok "BIND_IP=$BIND_IP_ARG"
+  else
+    err "invalid --bind value '$BIND_IP_ARG'. Expected an IP like 127.0.0.1, 0.0.0.0, or a LAN IP."
+    exit 1
+  fi
+else
+  log "bind IP from config: ${BIND_IP:-127.0.0.1} (default localhost only)"
 fi
 
 # --- 3. build + up ----------------------------------------------------------

@@ -61,7 +61,9 @@ curl -s http://localhost:8093/health
 
 The stack exposes one endpoint: `http://<host>:8093/mcp` (Streamable HTTP).
 The registration command differs per client; the endpoint is the same. Use
-`localhost` when the client runs on the same machine, your LAN IP otherwise.
+`localhost` when the client runs on the same machine. To reach it from
+another machine, set `BIND_IP` (see "Binding to the network" above) and use
+that machine's LAN IP.
 
 ### Hermes
 
@@ -104,8 +106,36 @@ Or open the repo - `opencode.jsonc` is committed and auto-detected.
 | 8092 | searxng | Metasearch |
 | 8093 | mcp | MCP endpoint for clients |
 
-All host ports bind to localhost by default. Change them in `.env` (see
+Host ports bind to **localhost (127.0.0.1) by default** - nothing on the
+network can reach them. Change the port numbers in `.env` (see
 `.env.example`).
+
+## Binding to the network (advanced)
+
+By default all host ports bind to `127.0.0.1`, so only processes on the same
+machine can reach them. If you want other machines to use the stack (e.g. an
+MCP client on another computer), set `BIND_IP` in `.env` or pass
+`--bind <ip>` to `install.sh`:
+
+| BIND_IP value | What it binds to | When to use |
+|---------------|------------------|-------------|
+| `127.0.0.1` | localhost only | Default. Same-machine clients only. |
+| `0.0.0.0` | all interfaces | LAN/internet reach (firewall permitting). Other machines use your machine's LAN IP. |
+| `<LAN IP>` | one specific interface | Bind to e.g. `192.168.1.50` only. |
+
+```bash
+# via install.sh (one-shot, does not persist to .env)
+./install.sh --bind 0.0.0.0
+
+# via .env (persistent)
+echo "BIND_IP=0.0.0.0" >> .env
+docker compose up -d
+```
+
+Security note: binding to `0.0.0.0` exposes the browser REST API, the
+metasearch, and the MCP endpoint to anything that can reach your machine.
+Keep `127.0.0.1` unless you need network clients, and pair `0.0.0.0` with a
+firewall rule that allows only trusted hosts.
 
 ## Configuration
 
@@ -116,6 +146,7 @@ Copy `.env.example` to `.env` to change any of these before first build:
 | `CAMOFOX_HOST_PORT` | 8091 | host port for camofox |
 | `SEARXNG_HOST_PORT` | 8092 | host port for searxng |
 | `MCP_HOST_PORT` | 8093 | host port for mcp |
+| `BIND_IP` | 127.0.0.1 | IP the host ports bind to (localhost only by default) |
 | `CAMOUFOX_VERSION` | 135.0.1 | Camoufox browser build |
 | `CAMOUFOX_RELEASE` | beta.24 | Camoufox release channel |
 | `SEARXNG_VERSION` | latest | SearXNG image tag |
@@ -137,8 +168,9 @@ Copy `.env.example` to `.env` to change any of these before first build:
 ```
 
 The mcp service reaches the browser over the private Docker network, not the
-internet. SearXNG caches in a private valkey. Host ports bind to localhost by
-default, so nothing is exposed publicly.
+internet. SearXNG caches in a private valkey. Host ports bind to localhost
+(127.0.0.1) by default, so nothing is exposed to the network - see "Binding
+to the network" above if you need LAN clients.
 
 ## Why this split?
 

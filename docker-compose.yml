@@ -61,7 +61,9 @@ services:
       # download also avoids the launchOptions version-spawn segfault.
       CAMOUFOX_EXECUTABLE: "/root/.cache/camoufox/camoufox-bin"
     ports:
-      - "${CAMOFOX_HOST_PORT:-8091}:9377"
+      # BIND_IP defaults to 127.0.0.1 (localhost only - safe default).
+      # Set BIND_IP=0.0.0.0 (or a LAN IP) in .env to expose to other hosts.
+      - "${BIND_IP:-127.0.0.1}:${CAMOFOX_HOST_PORT:-8091}:9377"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9377/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
@@ -83,7 +85,7 @@ services:
       - ./searxng/core-config:/etc/searxng
       - searxng-data:/var/cache/searxng
     ports:
-      - "${SEARXNG_HOST_PORT:-8092}:8080"
+      - "${BIND_IP:-127.0.0.1}:${SEARXNG_HOST_PORT:-8092}:8080"
     depends_on:
       - valkey
     healthcheck:
@@ -132,7 +134,7 @@ services:
       SEARXNG_BASE_URL: "http://searxng:8080"
       SEARXNG_TIMEOUT: "15"
     ports:
-      - "${MCP_HOST_PORT:-8093}:8095"
+      - "${BIND_IP:-127.0.0.1}:${MCP_HOST_PORT:-8093}:8095"
     depends_on:
       camofox:
         condition: service_healthy
