@@ -1,0 +1,27 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# Camoufox browser cache (downloaded at Docker build time, not source)
+.camoufox/
+
+# Docker build cache
+.docker/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local verification script (run manually, not part of the stack)
+verify_stack.py

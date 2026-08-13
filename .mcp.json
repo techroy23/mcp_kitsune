@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kitsune": {
+      "type": "http",
+      "url": "http://localhost:8093/mcp"
+    }
+  }
+}

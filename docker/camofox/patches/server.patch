@@ -1,0 +1,61 @@
+# mcp_kitsune stability patches for the upstream camofox-browser server.js
+# -----------------------------------------------------------------------------
+# Applied by docker/camofox/Dockerfile (stage-0 clone stage) via `patch -p1`.
+# These reproduce the exact patched server.js we validated and shipped before
+# switching to clone-on-the-fly. Without them the Camoufox binary segfaults:
+#   (1) the WebGL fingerprint probe (sampleWebGL via imit) crashes node without
+#       a proper display -- disable it with block_webgl.
+#   (2) launching against an Xvfb virtual display segfaults in this container
+#       (missing dbus / XDG_RUNTIME_DIR) -- force headless instead.
+# If upstream fixes these, drop the corresponding hunks.
+#
+# Hunk paths are relative to the repo root of the cloned tag (server.js there).
+
+--- a/server.js
++++ b/server.js
+@@ -1054,6 +1054,15 @@
+           excludeAddons: ['UBO'],
+         });
+       }
++      // PATCH (mcp_kitsune): launch via camoufox-js launchOptions() but with
++      // `block_webgl: true` to avoid a segfault. Root cause: without block_webgl,
++      // launchOptions() calls sampleWebGL(targetOS) which crashes the node
++      // process in this container (a native/network step - likely the WebGL
++      // fingerprint download via imit segfaulting without a proper display).
++      // block_webgl:true sets webgl.disabled:true (a legit Firefox pref) and
++      // SKIPS sampleWebGL entirely, preserving ALL other anti-detection
++      // (fingerprint, fonts, canvas, humanize, screen, UBO). The warning about
++      // WAFs is acceptable - extraction is our use case, not passing heavy WAFs.
+       const options = await launchOptions({
+         executable_path: externalCamoufox?.executablePath,
+         headless: useVirtualDisplay ? false : true,
+@@ -1064,8 +1073,13 @@
+         geoip: !!launchProxy,
+         virtual_display: vdDisplay,
+         exclude_addons: CONFIG.disableDefaultAddons ? ['UBO'] : undefined,
++        block_webgl: true,
++        i_know_what_im_doing: true,
+       });
+-      options.proxy = normalizePlaywrightProxy(options.proxy);
++      options.args = [...(options.args || []), '--no-sandbox'];
++      if (launchProxy) {
++        options.proxy = normalizePlaywrightProxy(options.proxy);
++      }
+       // Playwright's launcher defaults handleSIGTERM/SIGINT/SIGHUP to true,
+       // registering its own process signal handlers that send Browser.close
+
+--- a/server.js
++++ b/server.js
+@@ -6508,7 +6522,11 @@
+   metricsRegistry: getRegister,
+   createMetric,
+   /** Factory for Xvfb virtual display. Plugins can replace this to customise resolution/args. */
+-  createVirtualDisplay: () => new DefaultVirtualDisplay(),
++  // PATCH (mcp_kitsune): return null to force headless mode. The Camoufox
++  // binary segfaults when launched against Xvfb inside this container
++  // (missing dbus/XDG_RUNTIME_DIR). Headless is the upstream CI fallback and
++  // avoids the Xvfb segfault entirely. Remove this patch if you fix Xvfb.
++  createVirtualDisplay: () => null,
+   /** The upstream VirtualDisplay class -- plugins can subclass it. */
+   VirtualDisplay,
+ };

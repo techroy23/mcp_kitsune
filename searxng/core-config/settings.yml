@@ -1,0 +1,59 @@
+# Read the documentation before extending the defaults:
+# https://docs.searxng.org/admin/settings/
+
+# Load ALL built-in defaults, then override only what is listed below.
+# This is the modern merge mechanism - it keeps every required section
+# (server, search, ui, valkey, engines, doi_resolvers, ...) intact.
+use_default_settings: true
+
+# ---------------------------------------------------------------------------
+# General instance options
+# ---------------------------------------------------------------------------
+general:
+  # Displayed name shown in the header.
+  instance_name: "docker-searxng"
+  # Set to true only for development; enables verbose error pages.
+  debug: false
+  # Keep metrics enabled (used by /metrics endpoint).
+  enable_metrics: true
+
+# ---------------------------------------------------------------------------
+# Server options
+# ---------------------------------------------------------------------------
+server:
+  # Random secret for cookies/CSRF. Generated on first boot; replace with your
+  # own value if you regenerate this file:
+  #   python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+  secret_key: "AWLRgFvt75Xtp74F95rdAdYa38wT8y"
+  # Public URL of this instance. Set to your real domain if behind a reverse
+  # proxy (the trailing slash matters).
+  # Example: https://search.example.com/
+  base_url: "http://127.0.0.1:8092/"
+  # Proxy images through this instance (privacy + keeps client IP hidden
+  # from result sites).
+  image_proxy: true
+  # Bot protection / rate limiting OFF - this is a local/private instance.
+  # Enabling limiter requires a valkey URL AND an X-Forwarded-For header on
+  # every request (breaks direct curl/localhost access). Leave false unless
+  # you put this behind a reverse proxy and know what you are doing.
+  limiter: false
+  public_instance: false
+
+# ---------------------------------------------------------------------------
+# Search behavior
+# ---------------------------------------------------------------------------
+search:
+  # Filter results: 0 = None, 1 = Moderate, 2 = Strict.
+  safe_search: 0
+  # Leave blank to auto-detect from browser, or force a language.
+  default_lang: "auto"
+  # Autocomplete backend: "google", "duckduckgo", "wikipedia", ... or "" to
+  # disable. Keep "" if you do not want to leak keystrokes to a provider.
+  autocomplete: ""
+  # Which output formats are exposed. JSON is useful for API access; html is
+  # the UI. NOTE: this key MUST live under `search:` - the webapp reads
+  # settings['search']['formats'] and aborts 403 if the requested format is
+  # not listed here.
+  formats:
+    - html
+    - json

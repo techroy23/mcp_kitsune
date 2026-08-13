@@ -1,0 +1,152 @@
+# =============================================================================
+# mcp_kitsune - combined web-research stack
+#
+# One box, three services, one network:
+#   camofox  -> jo-inc/camofox-browser (anti-detection browser REST API)
+#   searxng  -> SearXNG metasearch (find URLs) + valkey companion
+#   mcp      -> mcp-camoufox MCP server (extract/view tools for MCP clients)
+#
+# Division of labor (user-mandated):
+#   SearXNG searches. camofox extracts. mcp exposes the extract tools.
+#
+# The mcp service points CAMOUFOX_BASE_URL at the BUNDLED camofox via Docker
+# DNS (http://camofox:9377) - fully self-contained, no external VPS needed.
+#
+# Ports (host:container):
+#   8091 -> camofox browser REST API (container 9377)
+#   8092 -> SearXNG metasearch        (container 8080)
+#   8093 -> mcp extract tools         (container 8095)
+#
+# Project name mcp_kitsune -> unique containers, no collision with the
+# existing docker-searxng project (port 8888) or mcp-camoufox (port 8084).
+#
+# Build/run:  docker compose up -d --build
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # camofox - anti-detection browser (jo-inc/camofox-browser)
+  # Self-contained Dockerfile: downloads Camoufox + yt-dlp at build time.
+  # Needs shm_size 2g (Firefox shared memory). Telemetry off by default.
+  # ---------------------------------------------------------------------------
+  camofox:
+    build:
+      # Context = repo ROOT. docker/camofox/Dockerfile is a thin multi-stage
+      # build that clones the upstream camofox-browser source at a pinned tag
+      # (no vendored source in this repo). The rest of the context ships the
+      # browser binary download + node deps.
+      context: .
+      dockerfile: docker/camofox/Dockerfile
+      args:
+        CAMOUFOX_VERSION: ${CAMOUFOX_VERSION:-135.0.1}
+        CAMOUFOX_RELEASE: ${CAMOUFOX_RELEASE:-beta.24}
+        # Upstream camofox-browser git tag to clone (npm v1.13.1 = tag v1.13.1).
+        # Pin it so builds are deterministic (do not follow upstream main).
+        CAMOFOX_UPSTREAM_TAG: ${CAMOFOX_UPSTREAM_TAG:-v1.13.1}
+    image: mcpkitsune-camofox:${CAMOUFOX_VERSION:-135.0.1}
+    container_name: mcpkitsune-camofox
+    restart: unless-stopped
+    shm_size: 2g
+    environment:
+      CAMOFOX_PORT: "9377"
+      CAMOFOX_CRASH_REPORT_ENABLED: "false"
+      CAMOFOX_API_KEY: "${CAMOFOX_API_KEY:-}"
+      # camoufox-js reads the browser version from CAMOUFOX_INSTALL_DIR.
+      # Default is ~/.cache/camoufox-js (empty here), which makes Version.fromPath()
+      # spawn the browser binary to read its version -> segfault (execFileSync).
+      # Point it at our bundle so it reads version.json instead of spawning.
+      CAMOUFOX_INSTALL_DIR: "/root/.cache/camoufox"
+      # CAMOUFOX_EXECUTABLE (upstream-sanctioned): launch this exact bundle
+      # instead of camoufox-js's own download/cache. Skipping the bundled
+      # download also avoids the launchOptions version-spawn segfault.
+      CAMOUFOX_EXECUTABLE: "/root/.cache/camoufox/camoufox-bin"
+    ports:
+      - "${CAMOFOX_HOST_PORT:-8091}:9377"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9377/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # searxng - metasearch (find URLs). Config in ./searxng/core-config.
+  # valkey companion required for caching; limiter stays off (local-only).
+  # ---------------------------------------------------------------------------
+  searxng:
+    image: docker.io/searxng/searxng:${SEARXNG_VERSION:-latest}
+    container_name: mcpkitsune-searxng
+    restart: unless-stopped
+    environment:
+      GRANIAN_PORT: "8080"
+    volumes:
+      - ./searxng/core-config:/etc/searxng
+      - searxng-data:/var/cache/searxng
+    ports:
+      - "${SEARXNG_HOST_PORT:-8092}:8080"
+    depends_on:
+      - valkey
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # valkey - in-memory cache for SearXNG (internal only, no host port)
+  # ---------------------------------------------------------------------------
+  valkey:
+    image: docker.io/valkey/valkey:9-alpine
+    container_name: mcpkitsune-valkey
+    restart: unless-stopped
+    command: valkey-server --save 30 1 --loglevel warning
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # mcp - mcp-camoufox MCP server (extract/view tools for MCP clients)
+  # Points at the BUNDLED camofox via Docker DNS, not an external VPS.
+  # Exposes Streamable HTTP on 8095 (host 8093). ZT/LAN trust only.
+  # ---------------------------------------------------------------------------
+  mcp:
+    build: ./mcp-combo
+    image: mcpkitsune-mcp:latest
+    container_name: mcpkitsune-mcp
+    restart: unless-stopped
+    environment:
+      CAMOUFOX_BASE_URL: "http://camofox:9377"
+      CAMOUFOX_USER_ID: "hermes-agent"
+      CAMOUFOX_SESSION_KEY: "mcp-kitsune"
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8095"
+      MCP_ALLOWED_HOSTS: "*"
+      MCP_ALLOWED_ORIGINS: ""
+      MCP_ENABLE_DNS_REBINDING_PROTECTION: "false"
+      CAMOUFOX_HTTP_TIMEOUT: "90"
+      SEARXNG_BASE_URL: "http://searxng:8080"
+      SEARXNG_TIMEOUT: "15"
+    ports:
+      - "${MCP_HOST_PORT:-8093}:8095"
+    depends_on:
+      camofox:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8095/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  searxng-data:
+  valkey-data:
+
+networks:
+  default:
+    name: mcpkitsune-net

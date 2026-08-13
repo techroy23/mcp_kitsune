@@ -1,0 +1,23 @@
+[project]
+name = "mcp-camoufox"
+version = "0.1.0"
+description = "MCP server wrapping the Camoufox browser REST API for web_extract-style page extraction."
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    "mcp>=2.0.0,<3",          # MCP SDK v2 (FastMCP removed in v2; use MCPServer)
+    "httpx>=0.27",
+    "uvicorn>=0.30",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+mcp-camoufox = "mcp_camoufox.server:main"
+mcp-camoufox-stdio = "mcp_camoufox.server:main_stdio_entry"
