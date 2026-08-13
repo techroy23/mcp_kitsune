@@ -4,7 +4,7 @@
 # One box, three services, one network:
 #   camofox  -> jo-inc/camofox-browser (anti-detection browser REST API)
 #   searxng  -> SearXNG metasearch (find URLs) + valkey companion
-#   mcp      -> mcp-camoufox MCP server (extract/view tools for MCP clients)
+#   mcp      -> kitsune MCP server (extract/view tools for MCP clients)
 #
 # Division of labor (user-mandated):
 #   SearXNG searches. camofox extracts. mcp exposes the extract tools.
@@ -16,9 +16,10 @@
 #   8091 -> camofox browser REST API (container 9377)
 #   8092 -> SearXNG metasearch        (container 8080)
 #   8093 -> mcp extract tools         (container 8095)
+#   8094 -> docs MCP tools + admin    (container 6280)
 #
 # Project name mcp_kitsune -> unique containers, no collision with the
-# existing docker-searxng project (port 8888) or mcp-camoufox (port 8084).
+# existing docker-searxng project (port 8888) or the standalone kitsune server.
 #
 # Build/run:  docker compose up -d --build
 # =============================================================================
@@ -112,7 +113,7 @@ services:
       retries: 5
 
   # ---------------------------------------------------------------------------
-  # mcp - mcp-camoufox MCP server (extract/view tools for MCP clients)
+  # mcp - kitsune MCP server (extract/view tools for MCP clients)
   # Points at the BUNDLED camofox via Docker DNS, not an external VPS.
   # Exposes Streamable HTTP on 8095 (host 8093). ZT/LAN trust only.
   # ---------------------------------------------------------------------------
@@ -145,9 +146,75 @@ services:
       retries: 3
       start_period: 10s
 
+  # ---------------------------------------------------------------------------
+  # docs - self-hosted library documentation search (Context7 replacement)
+  # arabold/docs-mcp-server: indexes official docs from web/GitHub/npm/PyPI/
+  # local files; serves search_docs/list_libraries/find_version/fetch_url
+  # over MCP (read-only set). Web admin console for indexing is on the same
+  # host port (8094 by default, /mcp + / share it).
+  # Read-only by default: agents can QUERY indexed docs but cannot scrape new
+  # libraries in-chat. Remove --read-only if you want agents to self-serve new
+  # library indexes (writes into the shared volume).
+  # Index persists in the docs-index volume (survives rebuilds).
+  # A docs-seed one-shot init container auto-indexes JS/TS/Node/Python on
+  # fresh builds (empty store only; see scripts/seed-docs.sh).
+  # Optional: semantic search via local embeddings (self-hosted, no OpenAI).
+  # Uncomment OLLAMA_HOST + set DOCS_EMBEDDING_MODEL=ollama:... to enable.
+  # ---------------------------------------------------------------------------
+  docs:
+    image: ghcr.io/arabold/docs-mcp-server:latest
+    container_name: mcpkitsune-docs
+    restart: unless-stopped
+    command: ["--protocol", "http", "--host", "0.0.0.0", "--port", "6280", "--read-only"]
+    environment:
+      # Index lives in the docs-index volume so scrapes survive rebuilds.
+      - DOCS_MCP_SERVER__APP__STORE_PATH=/data
+      # Optional local embeddings (self-hosted, no OpenAI). Default: none
+      # (pure full-text search). Enable by setting DOCS_EMBEDDING_MODEL in .env
+      # to something like ollama:nomic-embed-text and pointing OLLAMA_HOST at
+      # an Ollama container (or use any provider the sidecar supports).
+      - DOCS_MCP_SERVER__APP__EMBEDDING_MODEL=${DOCS_EMBEDDING_MODEL:-}
+      - OLLAMA_HOST=${OLLAMA_HOST:-}
+    volumes:
+      - docs-index:/data
+    ports:
+      - "${BIND_IP:-127.0.0.1}:${DOCS_HOST_PORT:-8094}:6280"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:6280/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # docs-seed - one-shot background indexer for the docs service.
+  # Runs in PARALLEL with docs (docs is NOT gated on it - deploy is instant).
+  # Shares the docs-index volume and scrapes the default library set
+  # (JS/TS/Node/Python). Per-library idempotent: skips what's already indexed,
+  # fills in what's missing, and exits. Non-fatal per library. Start manually
+  # with `docker compose run --rm docs-seed` to re-run/backfill.
+  # See scripts/seed-docs.sh for the logic + URL list.
+  # ---------------------------------------------------------------------------
+  docs-seed:
+    image: ghcr.io/arabold/docs-mcp-server:latest
+    container_name: mcpkitsune-docs-seed
+    restart: "no"
+    entrypoint: ["/bin/bash", "/seed-docs.sh"]
+    environment:
+      - DOCS_MCP_SERVER__APP__STORE_PATH=/data
+      - DOCS_SEED_LIBRARIES=${DOCS_SEED_LIBRARIES:-}
+      - DOCS_SEED_MAX_PAGES=${DOCS_SEED_MAX_PAGES:-100}
+      - DOCS_SEED_MAX_DEPTH=${DOCS_SEED_MAX_DEPTH:-4}
+      - DOCS_SEED_MAX_CONCURRENCY=${DOCS_SEED_MAX_CONCURRENCY:-4}
+      - DOCS_SEED_SCRAPE_MODE=${DOCS_SEED_SCRAPE_MODE:-fetch}
+    volumes:
+      - docs-index:/data
+      - ./scripts/seed-docs.sh:/seed-docs.sh:ro
+
 volumes:
   searxng-data:
   valkey-data:
+  docs-index:
 
 networks:
   default:

@@ -17,6 +17,8 @@
 # Usage:
 #   ./install.sh            # deploy + verify + optionally install skill
 #   ./install.sh --no-skill # skip the skill-file question (pure deploy)
+#   ./install.sh --no-docs  # skip the docs-mcp-server sidecar (Context7-style
+#                            # library-docs search; lighter stack, no docs tools)
 #   ./install.sh --bind 0.0.0.0   # bind host ports to all interfaces (default: 127.0.0.1)
 #   ./install.sh --bind 192.168.1.50  # bind to a specific LAN IP
 # =============================================================================
@@ -33,9 +35,11 @@ err()  { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; }
 # --- flags ------------------------------------------------------------------
 INSTALL_SKILL=1
 BIND_IP_ARG=""
+INSTALL_DOCS=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-skill) INSTALL_SKILL=0; shift ;;
+    --no-docs) INSTALL_DOCS=0; shift ;;
     --bind)
       # Value is the next arg. Requires --bind <ip> (space-separated).
       if [ $# -ge 2 ]; then
@@ -93,7 +97,7 @@ if docker compose ps --status running 2>/dev/null | grep -q "mcpkitsune-"; then
   log "existing mcp_kitsune stack detected - upgrade/re-run mode (ports already held by it)"
 fi
 
-for port_var in CAMOFOX_HOST_PORT SEARXNG_HOST_PORT MCP_HOST_PORT; do
+for port_var in CAMOFOX_HOST_PORT SEARXNG_HOST_PORT MCP_HOST_PORT DOCS_HOST_PORT; do
   port="$(env_val "$port_var")"
   if [ -n "$port" ] && ss -tln 2>/dev/null | grep -qE "[:.]${port} "; then
     if [ "$STACK_RUNNING" -eq 1 ]; then
@@ -136,16 +140,34 @@ else
 fi
 
 # --- 3. build + up ----------------------------------------------------------
+# Which compose services to (build and) run. Without --no-docs, the full stack
+# (docs sidecar included). With --no-docs, explicitly list the core services so
+# the docs-mcp-server image is never fetched/built.
+CORE_SERVICES="camofox searxng valkey mcp"
 log "building images (first build downloads the Camoufox browser, ~300 MB, 3-5 min)"
-if ! docker compose build; then
-  warn "initial build failed. Retrying once (known flaky Camoufox release download)..."
-  sleep 3
-  docker compose build || { err "build failed twice"; exit 2; }
+if [ "$INSTALL_DOCS" -eq 1 ]; then
+  if ! docker compose build; then
+    warn "initial build failed. Retrying once (known flaky Camoufox release download)..."
+    sleep 3
+    docker compose build || { err "build failed twice"; exit 2; }
+  fi
+  ok "images built"
+else
+  log "docs sidecar skipped via --no-docs (building core: $CORE_SERVICES)"
+  if ! docker compose build $CORE_SERVICES; then
+    warn "initial build failed. Retrying once (known flaky Camoufox release download)..."
+    sleep 3
+    docker compose build $CORE_SERVICES || { err "build failed twice"; exit 2; }
+  fi
+  ok "core images built"
 fi
-ok "images built"
 
 log "starting stack"
-docker compose up -d || { err "docker compose up failed"; exit 2; }
+if [ "$INSTALL_DOCS" -eq 1 ]; then
+  docker compose up -d || { err "docker compose up failed"; exit 2; }
+else
+  docker compose up -d $CORE_SERVICES || { err "docker compose up failed"; exit 2; }
+fi
 ok "containers started"
 
 # --- 4. wait for health -----------------------------------------------------
@@ -205,7 +227,12 @@ echo
 log "DONE - stack is up"
 echo "  MCP endpoint : http://localhost:${MCP_PORT}/mcp"
 echo "  Health check : $HEALTH_URL"
-echo "  Tools        : search_web, extract_web, extract_web_batch, extract_structured, browser_snapshot"
+echo "  Tools        : search_web, extract_web, extract_web_batch, extract_structured, browser_snapshot, search_docs, fetch_url, list_libraries, find_version"
+if [ "$INSTALL_DOCS" -eq 0 ]; then
+  echo "  (docs service skipped via --no-docs - search_docs/fetch_url/list_libraries/find_version will be unavailable)"
+else
+  echo "  Docs index   : auto-seeded in background on fresh build (JS/TS/Node/Python) - see DOCS_SEED_LIBRARIES in .env"
+fi
 echo "  Register     : hermes mcp add kitsune --transport streamable-http --url http://localhost:${MCP_PORT}/mcp"
 echo "                 (Claude Code / OpenCode: see AI.md)"
 echo

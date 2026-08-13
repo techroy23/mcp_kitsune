@@ -1,5 +1,5 @@
 """
-Live full-functionality harness for mcp_camoufox.
+Live full-functionality harness for kitsune.
 
 Starts the real MCP server (uvicorn) in a thread, then over HTTP drives the
 full MCP protocol:
@@ -33,7 +33,7 @@ os.environ.setdefault("MCP_PORT", "8096")
 # Docker-DNS name `searxng` only resolves inside the compose network).
 os.environ.setdefault("SEARXNG_BASE_URL", "http://127.0.0.1:8092")
 
-from mcp_camoufox import server as srv  # noqa: E402
+from kitsune import server as srv  # noqa: E402
 
 PORT = int(os.environ["MCP_PORT"])
 BASE = f"http://127.0.0.1:{PORT}"

@@ -6,7 +6,7 @@ file top to bottom. Each step is a decision: do this, check that, branch here.
 
 ## What you are setting up
 
-A Docker Compose stack of four containers on one network:
+A Docker Compose stack of five containers on one network:
 
 | Container | Job | Host port |
 |-----------|-----|-----------|
@@ -14,6 +14,7 @@ A Docker Compose stack of four containers on one network:
 | searxng | metasearch engine (find URLs) | 8092 |
 | mcp | MCP server (kitsune) - search + extract tools | 8093 |
 | valkey | search cache (internal) | none |
+| docs | docs-mcp-server - library docs index (Context7-style) | 8094 |
 
 The mcp container is the only one you talk to as a client. It exposes these
 tools over MCP Streamable HTTP at `http://localhost:8093/mcp`:
@@ -23,9 +24,16 @@ tools over MCP Streamable HTTP at `http://localhost:8093/mcp`:
 - `extract_web_batch` - render several pages in sequence
 - `extract_structured` - pull fields using a JSON schema
 - `browser_snapshot` - accessibility snapshot + screenshot
+- `search_docs` - search the indexed library docs (proxied to the docs container)
+- `fetch_url` - fetch a URL and return clean Markdown (proxied to the docs container)
+- `list_libraries` - list the libraries currently indexed in the docs container (discovery)
+- `find_version` - find the best matching indexed version for a library (version-aware)
 
-The normal flow is: `search_web` finds URLs, then `extract_web` (or batch)
-reads each page. SearXNG only searches; camofox/mcp only read.
+The normal web flow is: `search_web` finds URLs, then `extract_web` (or batch)
+reads each page. SearXNG only searches; camofox/mcp only read. `search_docs`
+is the docs flow - it queries the `docs` container's indexed library index
+(self-hosted Context7 replacement); the docs container must have the library
+indexed first (see "Indexing library docs").
 
 ## Step 1 - preflight
 
@@ -34,7 +42,7 @@ Check before doing anything:
 ```bash
 docker compose version   # must print a version (Compose plugin present)
 docker info              # daemon running and reachable
-df -h .                  # need ~2 GB free
+df -h .                  # need ~5 GB free (docs sidecar image is ~2.7 GB)
 ```
 
 If any of these fail, stop and report: Docker is not usable.
@@ -46,16 +54,18 @@ One-shot installer (recommended):
 ```bash
 ./install.sh             # build + start + verify + prompts for skill install
 ./install.sh --no-skill  # same, but never prompt about the skill
+./install.sh --no-docs   # same, but skip the docs sidecar (lighter stack; search_docs/fetch_url unavailable)
 ```
 
 What `install.sh` does, so you know what to expect:
 
-1. Checks Docker, the Compose plugin, and that ports 8091/8092/8093 are free
-   (skipped if this stack is already running - re-run is the upgrade path).
+1. Checks Docker, the Compose plugin, and that ports 8091/8092/8093/8094 are
+   free (skipped if this stack is already running - re-run is the upgrade path).
 2. Creates `.env` from `.env.example` if missing. Never wipes an existing
    `.env`.
-3. Builds images. First build downloads ~300 MB (Camoufox browser + yt-dlp),
-   3-5 min. Retries once on the known-flaky Camoufox download.
+3. Builds images. First build downloads ~300 MB (Camoufox browser + yt-dlp)
+   and the docs image (~2.7 GB), 3-5+ min. Retries once on the known-flaky
+   Camoufox download.
 4. Starts the stack and waits up to 120 s for `http://127.0.0.1:8093/health`
    to return `{"status":"ok",...}`.
 5. Runs `verify_stack.py` if present.
@@ -81,19 +91,23 @@ docker compose up -d --build
 
 ```bash
 docker compose ps
-# all four containers should show "Up (healthy)"
+# all five containers should show "Up (healthy)"
 
 curl -s http://127.0.0.1:8093/health
 ```
 
-The health JSON should contain `"status":"ok"` and
-`"camoufox":{"ok":true,"browserConnected":true,...}`.
+The health JSON should contain `"status":"ok"`,
+`"camoufox":{"ok":true,"browserConnected":true,...}`, and
+`"docs":{"ok":true,...}`.
 
 - `browserConnected: true` - the browser is up and the mcp server can reach
   it. Install is complete.
 - `browserConnected: false` - the browser is idle (it shuts down after no
   sessions for a while). That is normal; the first extract will boot it. Do
   not treat it as a failure if `"status":"ok"` is present.
+- `docs.ok: true` - the docs sidecar is up and queryable. `docs.ok: false`
+  (or `error`) means the docs tools (search_docs/fetch_url/list_libraries/
+  find_version) will fail; check `docker compose logs docs`.
 - `"status":"ok"` missing - something is wrong. See Step 5.
 
 ## Step 4 - register with an MCP client
@@ -154,6 +168,13 @@ Once registered, call the tools to confirm the full loop works:
 3. If both work, the stack is usable. Use search_web + extract_web /
    extract_web_batch for the actual research task. Prefer extract_web_batch
    over looping extract_web for many URLs (reuses the browser session).
+
+4. (docs) list_libraries() -> see what's indexed, then
+   search_docs(library=<listed lib>, query="<topic>")
+   -> expect ranked markdown snippets. find_version(library=<lib>) shows
+      which indexed versions you can pin. If search_docs errors "Library X
+      not found", the library isn't indexed - index it first (see "Indexing
+      library docs").
 ```
 
 Do not use camofox (port 8091) directly unless you need raw browser control
@@ -178,11 +199,48 @@ Copy `.env.example` to `.env` to change any of these before first build:
 | `CAMOFOX_HOST_PORT` | 8091 | host port for camofox |
 | `SEARXNG_HOST_PORT` | 8092 | host port for searxng |
 | `MCP_HOST_PORT` | 8093 | host port for mcp |
+| `DOCS_HOST_PORT` | 8094 | host port for docs |
 | `BIND_IP` | 127.0.0.1 | IP the host ports bind to (localhost only by default) |
 | `CAMOUFOX_VERSION` | 135.0.1 | Camoufox browser build |
 | `CAMOUFOX_RELEASE` | beta.24 | Camoufox release channel |
 | `SEARXNG_VERSION` | latest | SearXNG image tag |
 | `CAMOFOX_API_KEY` | (empty) | camofox cookie-import API key (optional) |
+| `DOCS_EMBEDDING_MODEL` | (empty) | docs semantic-search embedding model (e.g. `ollama:nomic-embed-text`). Empty = pure full-text search |
+| `OLLAMA_HOST` | (empty) | Ollama server URL when DOCS_EMBEDDING_MODEL is set |
+
+## Indexing library docs
+
+On a fresh build, the parallel `docs-seed` service auto-indexes the default
+set into the `docs-index` volume in the **background** (deploy is NOT blocked
+on seeding): **JS** (MDN reference), **TS** (TypeScript handbook), **NODE**
+(Node API), **PYTHON** (Python 3 docs). Per-library idempotent - skips
+libraries already at **completed** status, backfills failed/running/partial
+ones. Override the set with `DOCS_SEED_LIBRARIES` in `.env` (comma-separated
+`name=url` pairs). Crawl tuning in `.env`: `DOCS_SEED_MAX_PAGES` (default 100 -
+lean, fast), `DOCS_SEED_MAX_DEPTH`, `DOCS_SEED_MAX_CONCURRENCY`,
+`DOCS_SEED_SCRAPE_MODE` (default `fetch` - no browser; `playwright` only for
+JS-rendered SPAs). Re-run/backfill: `docker compose run --rm docs-seed`.
+
+`search_docs` will fail with "Library X not found" if a library is not
+indexed. Two ways to add more:
+
+1. **Web admin console**: open `http://localhost:8094`, use "Scrape New
+   Library" (name + docs URL). Shows indexing progress.
+2. **CLI inside the docs container** (shares the store):
+
+```bash
+# Example: index React's API reference (bundled CLI, no re-download)
+docker exec mcpkitsune-docs node --enable-source-maps dist/index.js scrape react https://react.dev/reference/react
+# Or backfill via the seed helper (respects DOCS_SEED_* tuning + idempotency):
+#   docker compose run --rm docs-seed
+```
+
+The index persists in the `docs-index` volume across restarts/rebuilds.
+
+`DOCS_EMBEDDING_MODEL` controls semantic search: empty (default) = pure
+full-text search, no model needed. Set `ollama:nomic-embed-text` (with
+`OLLAMA_HOST` pointing at an Ollama server) for vector search - still
+self-hosted, no OpenAI dependency.
 
 ## Binding to the network (only if a remote client needs it)
 
@@ -223,10 +281,16 @@ internet.
 - **camofox keeps restarting** - check `docker compose ps` for a high
   RestartCount, then `docker compose logs camofox | tail`. Firefox needs
   shared memory; bump `shm_size` to `4g` in docker-compose.yml if OOM.
-- **Port already in use** - run `ss -tlnp | grep -E '809(1|2|3)'`, find the
+- **Port already in use** - run `ss -tlnp | grep -E '809(1|2|3|4)'`, find the
   process, then change the host port in `.env` (never the container port).
 - **Container name collision** - a previous stack is running. Run
   `docker compose down` first, then `up` again.
+- **search_docs fails with a library error** - the docs index is empty or lacks
+  that library. Index it (see "Indexing library docs"). If search_docs/fetch_url
+  fail with a connection error, the docs sidecar is down: `docker compose logs docs`.
+- **docs image is large / slow first pull** - normal, the docs-mcp-server
+  image is ~2.7 GB. Skip it entirely with `install.sh --no-docs` if you do not
+  need the docs tools.
 
 ## Installing the agent skill (ask the user first)
 

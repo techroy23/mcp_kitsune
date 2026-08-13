@@ -21,13 +21,18 @@ Claude Code, and OpenCode out of the box.
 - `kitsune` (the MCP server) ties them together over [MCP Streamable
   HTTP](https://modelcontextprotocol.io), so any MCP client can call search +
   extract as plain tools.
+- [docs-mcp-server](https://github.com/arabold/docs-mcp-server) adds a
+  **library documentation index** - search exact-version API docs (React,
+  TypeScript, whatever you index) with semantic ranking. A self-hosted
+  replacement for Context7.
 
-One command starts all four containers (browser, search, cache, MCP gateway).
-Everything stays on your machine.
+One command starts all five containers (browser, search, cache, docs index,
+MCP gateway). Everything stays on your machine.
 
 ## Quick start
 
-Requires Docker with the Compose plugin. About 2 GB free disk.
+Requires Docker with the Compose plugin. About 5 GB free disk (docs sidecar
+image is ~2.7 GB).
 
 ```bash
 git clone https://github.com/techroy23/mcp_kitsune.git
@@ -48,13 +53,14 @@ Later starts are instant.
 
 ```bash
 docker compose ps
-# all four containers should show "Up (healthy)"
+# all five containers should show "Up (healthy)"
 
 curl -s http://localhost:8093/health
-# {"status":"ok","camoufox":{"ok":true,"browserConnected":true,...},...}
+# {"status":"ok","camoufox":{"ok":true,"browserConnected":true,...},"docs":{"ok":true,...},...}
 ```
 
-`camoufox.ok: true` means the MCP server can reach the browser. Stop with
+`camoufox.ok: true` means the MCP server can reach the browser. `docs.ok:
+true` means the docs index sidecar is up and queryable. Stop with
 `docker compose down`, start again with `docker compose up -d`.
 
 ## Using it from an MCP client
@@ -97,6 +103,14 @@ Or open the repo - `opencode.jsonc` is committed and auto-detected.
 | `extract_web_batch(urls, ...)` | Same, for several pages in sequence |
 | `extract_structured(url, json_schema)` | Pulls fields out of a page using a JSON schema |
 | `browser_snapshot(url)` | Accessibility snapshot + screenshot of a page |
+| `search_docs(library, query, version, limit)` | Searches the indexed library docs (docs-mcp-server sidecar). Version-aware, returns ranked markdown snippets |
+| `fetch_url(url)` | Fetches a URL and returns clean Markdown (docs-mcp-server sidecar) |
+| `list_libraries()` | Lists the libraries currently indexed in the docs sidecar (discovery before search_docs) |
+| `find_version(library, target_version)` | Finds the best matching indexed version for a library (version-aware) |
+
+`search_docs`, `fetch_url`, `list_libraries`, and `find_version` are proxied to
+the `docs` service. They require the `docs` container (skip with `--no-docs` in
+install.sh, which drops them).
 
 ## Ports
 
@@ -105,6 +119,7 @@ Or open the repo - `opencode.jsonc` is committed and auto-detected.
 | 8091 | camofox | Browser REST API (container 9377) |
 | 8092 | searxng | Metasearch |
 | 8093 | mcp | MCP endpoint for clients |
+| 8094 | docs | docs-mcp-server MCP docs tools + admin console |
 
 Host ports bind to **localhost (127.0.0.1) by default** - nothing on the
 network can reach them. Change the port numbers in `.env` (see
@@ -146,11 +161,47 @@ Copy `.env.example` to `.env` to change any of these before first build:
 | `CAMOFOX_HOST_PORT` | 8091 | host port for camofox |
 | `SEARXNG_HOST_PORT` | 8092 | host port for searxng |
 | `MCP_HOST_PORT` | 8093 | host port for mcp |
+| `DOCS_HOST_PORT` | 8094 | host port for docs |
 | `BIND_IP` | 127.0.0.1 | IP the host ports bind to (localhost only by default) |
 | `CAMOUFOX_VERSION` | 135.0.1 | Camoufox browser build |
 | `CAMOUFOX_RELEASE` | beta.24 | Camoufox release channel |
 | `SEARXNG_VERSION` | latest | SearXNG image tag |
 | `CAMOFOX_API_KEY` | (empty) | camofox cookie-import API key (optional) |
+| `DOCS_EMBEDDING_MODEL` | (empty) | docs semantic-search embedding model (e.g. `ollama:nomic-embed-text`). Empty = pure full-text search |
+| `OLLAMA_HOST` | (empty) | Ollama server URL when DOCS_EMBEDDING_MODEL is set |
+
+## Indexing library docs
+
+The `docs` service auto-indexes a default set in the **background** after a
+fresh build (via the parallel one-shot `docs-seed` service): **JS** (MDN
+reference), **TS** (TypeScript handbook), **NODE** (Node API), **PYTHON**
+(Python 3 docs). Seeding runs concurrently with `docs` startup - deploy is not
+blocked. Per-library idempotent: skips libraries already indexed to
+**completed** status (failed/running/partial ones get re-scraped), backfills
+the rest. Override the set with `DOCS_SEED_LIBRARIES` in `.env`
+(comma-separated `name=url` pairs). Crawl tuning: `DOCS_SEED_MAX_PAGES`
+(default 100 - lean, fast), `DOCS_SEED_MAX_DEPTH`, `DOCS_SEED_MAX_CONCURRENCY`,
+`DOCS_SEED_SCRAPE_MODE` (default `fetch` - no headless browser; use
+`playwright` only for JS-rendered SPA docs). Re-run/backfill manually with
+`docker compose run --rm docs-seed`. The index persists in the `docs-index`
+volume across restarts.
+
+Index more libraries (or re-index) two ways:
+
+1. **Web admin console** (easiest): open `http://localhost:8094`, click
+   "Scrape New Library", give a name + docs URL. The console also shows
+   indexing progress.
+2. **CLI** (in a container with the same store): the sidecar's `scrape`,
+   `search`, and `list` subcommands manage libraries.
+
+```bash
+# Example: index React's API reference (bundled CLI, no re-download)
+docker exec mcpkitsune-docs node --enable-source-maps dist/index.js scrape react https://react.dev/reference/react
+# Or backfill via the seed helper (respects DOCS_SEED_* tuning + idempotency):
+#   docker compose run --rm docs-seed
+```
+
+The index persists in the `docs-index` volume across restarts/rebuilds.
 
 ## How it fits together
 
@@ -164,21 +215,27 @@ Copy `.env.example` to `.env` to change any of these before first build:
 |  8093 -> mcp (MCP endpoint, 8095)   kitsune                  |
 |  8092 -> searxng (metasearch, 8080) searxng/searxng          |
 |            | valkey (cache, internal)                        |
+|  8094 -> docs (docs-mcp-server, 6280) arabold/docs-mcp-server|
+|            | docs-index (volume, persists)                   |
 +--------------------------------------------------------------+
 ```
 
 The mcp service reaches the browser over the private Docker network, not the
-internet. SearXNG caches in a private valkey. Host ports bind to localhost
-(127.0.0.1) by default, so nothing is exposed to the network - see "Binding
-to the network" above if you need LAN clients.
+internet. SearXNG caches in a private valkey. The docs sidecar keeps its index
+in a private volume. Host ports bind to localhost (127.0.0.1) by default, so
+nothing is exposed to the network - see "Binding to the network" above if you
+need LAN clients.
 
 ## Why this split?
 
 - **SearXNG only searches.** It cannot extract page content.
 - **camofox/mcp only read.** A browser-engine search from a datacenter IP is
   CAPTCHA-blocked; SearXNG aggregates server-side instead.
-- Normal flow: `search_web` finds URLs -> `extract_web` reads each page and
-  returns clean text.
+- **docs-mcp-server only knows library docs.** It cannot search the general
+  web or render JS pages - that's camofox.
+- Normal web flow: `search_web` finds URLs -> `extract_web` reads each page and
+  returns clean text. Docs flow: `search_docs` queries the indexed library
+  index -> returns ranked markdown snippets (Context7-style).
 
 ## Troubleshooting
 
@@ -192,12 +249,17 @@ to the network" above if you need LAN clients.
   `ss -tlnp | grep -E '809(1|2|3)'`.
 - **Container name collision** - a previous stack is running. Stop it with
   `docker compose down`.
+- **`search_docs` says "Library X not found"** - the docs index is empty or
+  doesn't have that library yet. Index it (see "Indexing library docs").
+- **`docs.ok: false` in /health** - the docs sidecar is down or not queryable.
+  Check `docker compose logs docs`. The MCP endpoint only needs `docs` up, not
+  `camofox`.
 
 ## Layout
 
 ```text
 mcp_kitsune/
-+-- docker-compose.yml    # 4-service stack
++-- docker-compose.yml    # 5-service stack
 +-- install.sh            # one-shot deploy + verify
 +-- .env.example          # port + version overrides
 +-- .mcp.json             # Claude Code project config

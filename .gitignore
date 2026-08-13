@@ -25,3 +25,4 @@ Thumbs.db
 
 # Local verification script (run manually, not part of the stack)
 verify_stack.py
+.hermes/

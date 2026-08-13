@@ -1,10 +1,12 @@
 """
-mcp_camoufox - MCP server wrapping the Camoufox browser REST API.
+kitsune - MCP web research gateway (SearXNG search + Camoufox extract + docs search).
 
-Turns the self-hosted Camoufox anti-detection browser (Firefox-based) into a
-first-class `web_extract`-style capability
-for Hermes: fetch a page in a real stealth browser, wait for content, read the
-accessibility tree / run JS to get clean text, and return readable markdown.
+Turns the self-hosted stack into first-class research capabilities for agents:
+- search_web through SearXNG (find URLs, no CAPTCHA block at datacenter IPs)
+- extract_web / extract_structured / browser_snapshot through the Camoufox
+  anti-detection browser (read JS-heavy / bot-protected pages)
+- search_docs / fetch_url proxied to the docs-mcp-server sidecar (Context7-style
+  library documentation search)
 
 Why this exists: SearXNG is search-only (no page-fetch/extract). Exa/Firecrawl
 are cloud. Camoufox is self-hosted, free, stealth, and already deployed on the
@@ -21,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlparse
@@ -45,6 +48,10 @@ CAMOUFOX_SESSION_KEY = os.environ.get("CAMOUFOX_SESSION_KEY", "mcp-kitsune")
 # SearXNG search backend (in-stack DNS when running inside the same compose).
 SEARXNG_BASE_URL = os.environ.get("SEARXNG_BASE_URL", "http://searxng:8080")
 SEARXNG_TIMEOUT = float(os.environ.get("SEARXNG_TIMEOUT", "15"))
+# docs-mcp-server sidecar: self-hosted library documentation search
+# (Context7 replacement). In-stack DNS name when running in the same compose.
+DOCS_MCP_BASE_URL = os.environ.get("DOCS_MCP_BASE_URL", "http://docs:6280")
+DOCS_MCP_TIMEOUT = float(os.environ.get("DOCS_MCP_TIMEOUT", "30"))
 MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("MCP_PORT", "8095"))
 HTTP_TIMEOUT = float(os.environ.get("CAMOUFOX_HTTP_TIMEOUT", "90"))
@@ -212,6 +219,56 @@ class CamoufoxClient:
             return {"error": "evaluate did not return a JSON string", "raw": result}
         finally:
             await self.close_tab(tab_id)
+
+
+class DocsMcpClient:
+    """Thin async HTTP client for the docs-mcp-server sidecar (MCP streamable HTTP).
+
+    Proxies tools/call requests to the Node sidecar so kitsune can expose
+    search_docs/fetch_url under one coherent MCP surface. The sidecar does the
+    heavy lifting (indexing, FTS/vector search); this class just forwards.
+    """
+
+    def __init__(self, base_url: str, timeout: float) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    async def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": f"kitsune-{time.time():.3f}",
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments},
+        }
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.post(
+                f"{self.base_url}/mcp",
+                json=payload,
+                headers={"Accept": "application/json, text/event-stream"},
+            )
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"docs-mcp-server {tool_name} -> HTTP {resp.status_code}: {resp.text[:300]}"
+                )
+            # docs-mcp-server responds with SSE framing even to POST (event:
+            # message\\ndata: {json}). Strip the event/data envelope before parse.
+            text = resp.text
+            if text.lstrip().startswith("event:"):
+                data_line = next(
+                    (line[5:].strip() for line in text.splitlines() if line.startswith("data:")),
+                    None,
+                )
+                if data_line is None:
+                    raise RuntimeError(f"docs-mcp-server {tool_name}: SSE without data line")
+                data = json.loads(data_line)
+            else:
+                data = resp.json()
+        # Extract the text content array from the MCP result envelope.
+        result = data.get("result", {}) if isinstance(data, dict) else {}
+        return {
+            "content": result.get("content", []),
+            "isError": result.get("isError", False),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +501,129 @@ async def browser_snapshot(url: str, wait_ms: int = 3000) -> dict[str, Any]:
         return {"error": f"snapshot failed: {exc}", "url": url}
 
 
+@mcp.tool()
+async def search_docs(
+    library: str,
+    query: str,
+    version: str | None = None,
+    limit: int = 5,
+) -> dict[str, Any]:
+    """Search up-to-date documentation for a library/package (docs-mcp-server sidecar).
+
+    Self-hosted replacement for Context7. Returns ranked, version-aware docs
+    snippets with markdown content (real code examples, API signatures). Requires
+    the 'docs' compose service. Pair with search_web/extract_web for broad web
+    research; this is for exact library/API docs.
+
+    Args:
+        library: Package/library name (e.g. 'react', 'python', 'openai').
+        query:   Documentation search query (e.g. 'hooks lifecycle').
+        version: Optional version or X-range (e.g. '18.0.0', '5.x'). Searches
+                 the matching version if indexed; otherwise closest available.
+        limit:   Max result snippets (default 5).
+    """
+    try:
+        client = DocsMcpClient(DOCS_MCP_BASE_URL, DOCS_MCP_TIMEOUT)
+        arguments: dict[str, Any] = {"library": library, "query": query, "limit": limit}
+        if version:
+            arguments["version"] = version
+        result = await client._call_tool("search_docs", arguments)
+    except Exception as exc:
+        return {"error": f"docs search failed: {exc}", "library": library, "query": query}
+    return {
+        "library": library,
+        "query": query,
+        "version": version,
+        "numResults": len(result.get("content", [])),
+        "content": result.get("content", []),
+        "isError": result.get("isError", False),
+    }
+
+
+@mcp.tool()
+async def fetch_url(url: str) -> dict[str, Any]:
+    """Fetch a URL and convert it to clean Markdown (docs-mcp-server sidecar).
+
+    Read path for docs-indexed pages / general pages returning Markdown, useful
+    when you want a plain-text view without launching the stealth browser. This
+    is the docs-mcp-server 'fetch_url' tool proxied through kitsune. It differs
+    from extract_web (stealth browser + JS) - use this for simple static pages.
+
+    Args:
+        url: The http(s) URL to fetch and convert to Markdown.
+    """
+    _validate_url(url)
+    try:
+        client = DocsMcpClient(DOCS_MCP_BASE_URL, DOCS_MCP_TIMEOUT)
+        result = await client._call_tool("fetch_url", {"url": url})
+    except Exception as exc:
+        return {"error": f"docs fetch failed: {exc}", "url": url}
+    return {
+        "url": url,
+        "content": result.get("content", []),
+        "isError": result.get("isError", False),
+    }
+
+
+@mcp.tool()
+async def list_libraries() -> dict[str, Any]:
+    """List all libraries currently indexed in the docs service (read-only).
+
+    Discovery helper for the docs-mcp-server sidecar. Use this before
+    search_docs to learn which library names are available to query, so you
+    do not guess incorrectly and get a 'library not found'. Example output
+    includes the library name and its indexed version(s).
+
+    Returns:
+        The docs sidecar's list of indexed libraries (name + versions).
+    """
+    try:
+        client = DocsMcpClient(DOCS_MCP_BASE_URL, DOCS_MCP_TIMEOUT)
+        result = await client._call_tool("list_libraries", {})
+    except Exception as exc:
+        return {"error": f"docs list_libraries failed: {exc}"}
+    return {
+        "content": result.get("content", []),
+        "isError": result.get("isError", False),
+    }
+
+
+@mcp.tool()
+async def find_version(
+    library: str,
+    target_version: str | None = None,
+) -> dict[str, Any]:
+    """Find the best matching indexed version for a library (read-only).
+
+    Version-aware companion to search_docs. Given a library and (optionally)
+    a version or X-range (e.g. '18.0.0' or '5.x'), returns the closest
+    indexed version(s). Use this to discover which versions of a library are
+    available before searching, or to pin a search to a specific version.
+
+    Args:
+        library: Package/library name (must be indexed; see list_libraries).
+        target_version: Optional version or X-range to match (e.g. '18.0.0',
+                 '5.x'). If omitted, returns the latest indexed version.
+
+    Returns:
+        The docs sidecar's matching version(s) metadata.
+    """
+    try:
+        client = DocsMcpClient(DOCS_MCP_BASE_URL, DOCS_MCP_TIMEOUT)
+        arguments: dict[str, Any] = {"library": library}
+        if target_version:
+            arguments["targetVersion"] = target_version
+        result = await client._call_tool("find_version", arguments)
+    except Exception as exc:
+        return {"error": f"docs find_version failed: {exc}", "library": library}
+    return {
+        "library": library,
+        "target_version": target_version,
+        "content": result.get("content", []),
+        "isError": result.get("isError", False),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Starlette app: /health + MCP endpoint at /mcp
 # ---------------------------------------------------------------------------
@@ -462,18 +642,28 @@ async def health_route(request: Request) -> JSONResponse:
         camo_status = camo.json() if camo.status_code == 200 else {"error": f"HTTP {camo.status_code}"}
     except Exception as exc:
         camo_status = {"error": str(exc)}
+    try:
+        # docs-mcp-server owns /health as its web admin console (HTML); the
+        # real MCP surface lives at /mcp. Probe /mcp with a cheap tools/list
+        # to confirm the docs sidecar is actually queryable.
+        docs_client = DocsMcpClient(DOCS_MCP_BASE_URL, 10)
+        await docs_client._call_tool("list_libraries", {})
+        docs_status = {"ok": True, "mcp": f"{DOCS_MCP_BASE_URL}/mcp"}
+    except Exception as exc:
+        docs_status = {"error": str(exc)}
     return JSONResponse(
         {
             "status": "ok",
             "camoufox": camo_status,
-            "mcp_tools": ["search_web", "extract_web", "extract_web_batch", "extract_structured", "browser_snapshot"],
+            "docs": docs_status,
+            "mcp_tools": ["search_web", "extract_web", "extract_web_batch", "extract_structured", "browser_snapshot", "search_docs", "fetch_url", "list_libraries", "find_version"],
             "searxng": SEARXNG_BASE_URL,
         }
     )
 
 
 async def root_route(request: Request) -> PlainTextResponse:
-    return PlainTextResponse("mcp-camoufox: MCP streamable-http endpoint at /mcp, health at /health")
+    return PlainTextResponse("kitsune: MCP streamable-http endpoint at /mcp, health at /health")
 
 
 app = Starlette(

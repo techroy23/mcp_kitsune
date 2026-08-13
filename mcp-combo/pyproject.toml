@@ -1,7 +1,7 @@
 [project]
-name = "mcp-camoufox"
+name = "kitsune"
 version = "0.1.0"
-description = "MCP server wrapping the Camoufox browser REST API for web_extract-style page extraction."
+description = "kitsune MCP server - web research gateway (SearXNG search + Camoufox extract + docs search)."
 readme = "README.md"
 requires-python = ">=3.11"
 
@@ -19,5 +19,5 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [project.scripts]
-mcp-camoufox = "mcp_camoufox.server:main"
-mcp-camoufox-stdio = "mcp_camoufox.server:main_stdio_entry"
+kitsune = "kitsune.server:main"
+kitsune-stdio = "kitsune.server:main_stdio_entry"

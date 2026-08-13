@@ -19,6 +19,64 @@ Every client (Hermes, OpenCode, Claude Code) sees the same tools.
 camofox and returns `{title, content, charCount, links, extracted_with}`.
 Never use one for the other's job.
 
+## Library / API docs (Context7-style)
+
+For exact library/package/API documentation, kitsune also proxies 4 tools to
+the docs-mcp-server sidecar (requires the `docs` container in the stack):
+
+| Tool | Job |
+|------|-----|
+| `mcp__kitsune__list_libraries()` | What libraries are indexed? Call first (discovery). |
+| `mcp__kitsune__find_version(library, target_version)` | What indexed versions exist for a library? |
+| `mcp__kitsune__search_docs(library, query, version, limit)` | Search a library's docs, version-aware, ranked markdown snippets. |
+| `mcp__kitsune__fetch_url(url)` | Fetch a URL and return clean Markdown (simple static pages). |
+
+Docs flow: `list_libraries()` -> `search_docs(library, query)` -> (if pinned)
+`find_version(library, target_version)`. Use `search_web` + `extract_web` for
+general web; use `search_docs` for exact library/API answers.
+
+## When to use docs vs general web (decision rule)
+
+Ask: is the question asking for AUTHORITATIVE reference docs for a specific
+library, package, framework, or language API?
+
+| Situation | Use |
+|-----------|-----|
+| "What's the signature of `fs.readFile`?" / "How does X library's API work?" / API docs, functions, params, semantics | **`search_docs(library, query)`** - the official index wins |
+| Version-specific question (e.g. Node 18 vs 20 behavior) | **`find_version(library, target_version)`** first, then `search_docs` with that version |
+| "What is X?" / tutorials, blogs, comparisons, prices, news, examples-in-the-wild | **`search_web` + `extract_web`** - general web |
+| I don't know if the library is even indexed | **`list_libraries()`** first |
+
+Default to `search_docs` for anything about a library/API's own contract. Fall
+back to `search_web` only when docs come up empty or the topic is general.
+
+## When to ask docs to scrape NEW documentation
+
+If `list_libraries()` shows the library is NOT indexed (or `search_docs` returns
+"Library X not found"), do NOT silently fall back to general web - the official
+docs are usually the best answer. Ask the user (or trigger the scraper) to index
+it:
+
+```bash
+# re-run seeder with extra library (runs in background, idempotent, lean)
+# run from the repo dir that has docker-compose.yml
+docker compose run --rm docs-seed \
+  -e DOCS_SEED_LIBRARIES="<name>=<official-docs-url>"
+```
+
+Route to the right indexer:
+- **Code library / framework** (e.g. a PyPI/npm package, a framework): scrape
+  its official docs URL. Both cover it.
+- **Language / runtime** (JS, TS, Node, Python - the seeded defaults): already
+  indexed, just `search_docs`. If needing deeper coverage, re-seed with a
+  higher `DOCS_SEED_MAX_PAGES` or add a URL.
+- **Web admin console** `localhost:8094` -> "Scrape New Library" also works and
+  shows progress.
+
+Scrapes are idempotent (skip completed libs), run in `fetch` mode (fast, no
+browser), capped at `DOCS_SEED_MAX_PAGES` (default 100) - so triggering one is
+cheap and safe. Wait briefly for it to complete, then `list_libraries()` again.
+
 ## Golden workflow
 
 1. `search_web("query site:target.com")` - scope with `site:`, bump `max_results` for a deep sweep.
