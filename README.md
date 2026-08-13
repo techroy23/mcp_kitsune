@@ -1,5 +1,8 @@
 # mcp_kitsune - self-contained search + extract for AI agents
 
+<center><img src="image.png" width="250" /></center>
+
+
 A Docker Compose stack that gives AI agents (and scripts) two things they
 usually cannot get with a plain HTTP library: **search results that are not
 CAPTCHA-blocked** and **page text from sites that block scrapers**. It runs
@@ -173,7 +176,3 @@ mcp_kitsune/
 +-- searxng/              # SearXNG settings
 +-- mcp-combo/            # kitsune MCP server
 ```
-
-## License
-
-MIT
