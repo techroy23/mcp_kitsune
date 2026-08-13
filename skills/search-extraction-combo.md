@@ -77,6 +77,25 @@ Scrapes are idempotent (skip completed libs), run in `fetch` mode (fast, no
 browser), capped at `DOCS_SEED_MAX_PAGES` (default 100) - so triggering one is
 cheap and safe. Wait briefly for it to complete, then `list_libraries()` again.
 
+**Trigger pitfall (tested):** a full scrape takes 4-5+ min. A 180s foreground
+`terminal()` call WILL time out. Run the trigger with `background=true` +
+`notify_on_complete=true`, or background it and poll
+`list_libraries()` / the seed container. The scrape keeps running even if your
+foreground wrapper times out.
+
+**Seed coverage (tested):** the 100-page default cap is LEAN - on big docs
+sites (e.g. python.org) it can grab navigation/index pages and miss the deep
+API pages (asyncio.gather returned bdb/genindex pages, not the real
+asyncio-task page). If a `search_docs` hit looks wrong/missing for a language
+stdlib, re-seed that library deeper:
+
+```bash
+# force re-scrape of a completed lib with a deeper crawl
+docker compose run --rm -e DOCS_SEED_MAX_PAGES=400 \
+  -e DOCS_SEED_LIBRARIES="python=https://docs.python.org/3/@fetch" \
+  -e DOCS_SEED_FORCE=1 docs-seed
+```
+
 ## Golden workflow
 
 1. `search_web("query site:target.com")` - scope with `site:`, bump `max_results` for a deep sweep.
