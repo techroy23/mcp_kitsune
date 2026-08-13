@@ -98,11 +98,17 @@ The health JSON should contain `"status":"ok"` and
 
 ## Step 4 - register with an MCP client
 
-The endpoint `http://<host>:8093/mcp` is the same for every client. Use
-`localhost` when the client is on the same machine as the stack, LAN IP
-otherwise. The three configs below are the supported clients. `.mcp.json` and
-`opencode.jsonc` are already committed in the repo and auto-detected when the
-project is opened, so you may not need to register at all.
+The endpoint `http://<host>:8093/mcp` is the same for every client. Host
+ports bind to **localhost (127.0.0.1) by default**, so use `localhost` when
+the client is on the same machine as the stack. Only machines that share the
+host can reach it otherwise. The three configs below are the supported
+clients. `.mcp.json` and `opencode.jsonc` are already committed in the repo
+and auto-detected when the project is opened, so you may not need to register
+at all.
+
+If the client runs on a *different* machine, the stack must be configured to
+bind to the network first - see "Binding to the network" below. Until you set
+that, a remote client cannot connect.
 
 ### Hermes
 
@@ -172,10 +178,40 @@ Copy `.env.example` to `.env` to change any of these before first build:
 | `CAMOFOX_HOST_PORT` | 8091 | host port for camofox |
 | `SEARXNG_HOST_PORT` | 8092 | host port for searxng |
 | `MCP_HOST_PORT` | 8093 | host port for mcp |
+| `BIND_IP` | 127.0.0.1 | IP the host ports bind to (localhost only by default) |
 | `CAMOUFOX_VERSION` | 135.0.1 | Camoufox browser build |
 | `CAMOUFOX_RELEASE` | beta.24 | Camoufox release channel |
 | `SEARXNG_VERSION` | latest | SearXNG image tag |
 | `CAMOFOX_API_KEY` | (empty) | camofox cookie-import API key (optional) |
+
+## Binding to the network (only if a remote client needs it)
+
+Host ports bind to `127.0.0.1` by default, so only processes on the same
+machine can reach the stack. If an MCP client runs on another machine, it
+cannot connect until you change the bind. Choose deliberately:
+
+| BIND_IP value | What it binds to | When to use |
+|---------------|------------------|-------------|
+| `127.0.0.1` | localhost only | Default. Same-machine clients only. |
+| `0.0.0.0` | all interfaces | LAN/internet reach (firewall permitting). Clients use the host's LAN IP. |
+| `<LAN IP>` | one specific interface | Bind to e.g. `192.168.1.50` only. |
+
+Apply it one of two ways:
+
+```bash
+# one-shot via the installer (does not persist to .env)
+./install.sh --bind 0.0.0.0 --no-skill
+
+# persistent via .env
+echo "BIND_IP=0.0.0.0" >> .env
+docker compose up -d
+```
+
+Security note: `0.0.0.0` exposes the browser REST API, the metasearch, and
+the MCP endpoint to anything that can reach the host. Prefer a specific LAN
+IP, and pair any non-localhost bind with a firewall rule that allows only
+trusted hosts. Never bind `0.0.0.0` on a host that is directly on the public
+internet.
 
 ## Troubleshooting (agent decision tree)
 
