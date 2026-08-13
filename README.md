@@ -27,7 +27,7 @@ Everything stays on your machine.
 Requires Docker with the Compose plugin. About 2 GB free disk.
 
 ```bash
-git clone <your-repo-url> mcp_kitsune
+git clone https://github.com/techroy23/mcp_kitsune.git
 cd mcp_kitsune
 ./install.sh            # build + start + verify (asks about a skill file)
 ```
