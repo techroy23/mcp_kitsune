@@ -126,6 +126,10 @@ services:
       CAMOUFOX_BASE_URL: "http://camofox:9377"
       CAMOUFOX_USER_ID: "hermes-agent"
       CAMOUFOX_SESSION_KEY: "mcp-kitsune"
+      # Disable session state persistence to avoid corrupted profile cascades.
+      # When enabled, each tab creation uses a unique session key so Camoufox
+      # never restores a broken storage-state.json from a prior crash.
+      CAMOUFOX_DISABLE_PERSISTENCE: "true"
       MCP_HOST: "0.0.0.0"
       MCP_PORT: "8095"
       MCP_ALLOWED_HOSTS: "*"

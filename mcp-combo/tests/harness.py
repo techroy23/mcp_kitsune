@@ -111,9 +111,17 @@ def main() -> None:
         check("GET /health 200", code == 200, f"got {code}")
         check("health.camoufox.ok is True", health.get("camoufox", {}).get("ok") is True, json.dumps(health)[:200])
         check(
-            "health lists 5 mcp tools",
-            len(health.get("mcp_tools", [])) == 5
-            and health.get("mcp_tools") == ["search_web", "extract_web", "extract_web_batch", "extract_structured", "browser_snapshot"],
+            "health lists 9 mcp tools",
+            len(health.get("mcp_tools", [])) == 9
+            and "search_web" in health.get("mcp_tools", [])
+            and "extract_web" in health.get("mcp_tools", [])
+            and "extract_web_batch" in health.get("mcp_tools", [])
+            and "extract_structured" in health.get("mcp_tools", [])
+            and "browser_snapshot" in health.get("mcp_tools", [])
+            and "search_docs" in health.get("mcp_tools", [])
+            and "fetch_url" in health.get("mcp_tools", [])
+            and "list_libraries" in health.get("mcp_tools", [])
+            and "find_version" in health.get("mcp_tools", []),
             str(health.get("mcp_tools")),
         )
 
@@ -139,7 +147,7 @@ def main() -> None:
         msg = latest_message(text)
         tools = msg.get("result", {}).get("tools", []) if msg else []
         names = [t["name"] for t in tools]
-        for expected in ["search_web", "extract_web", "extract_web_batch", "extract_structured", "browser_snapshot"]:
+        for expected in ["search_web", "extract_web", "extract_web_batch", "extract_structured", "browser_snapshot", "search_docs", "fetch_url", "list_libraries", "find_version"]:
             check(f"tools/list has {expected}", expected in names, str(names))
 
         print("== ping ==")
@@ -180,6 +188,28 @@ def main() -> None:
         blob = tool_content(ev)
         check("search_web returns results", '"numResults"' in blob and '"results"' in blob, blob[:400])
         check("search_web results non-empty", '"example.com"' in blob or '"example.org"' in blob or blob.count('"url"') > 0, blob[:400])
+
+        print("== list_libraries ==")
+        code, ev = call_tool("list_libraries", {})
+        check("list_libraries call HTTP 200", code == 200, f"got {code}")
+
+        print("== search_docs ==")
+        code, ev = call_tool("search_docs", {"library": "python", "query": "requests", "limit": 2})
+        check("search_docs call HTTP 200", code == 200, f"got {code}")
+        blob = tool_content(ev)
+        check("search_docs returns content", '"content"' in blob, blob[:300])
+
+        print("== browser_snapshot ==")
+        code, ev = call_tool("browser_snapshot", {"url": "https://example.com", "wait_ms": 2500})
+        check("browser_snapshot call HTTP 200", code == 200, f"got {code}")
+        blob = tool_content(ev)
+        check("browser_snapshot returns a11y tree", "Example Domain" in blob or "example" in blob.lower(), blob[:300])
+
+        print("== extract_structured ==")
+        code, ev = call_tool("extract_structured", {"url": "https://example.com", "schema": {"type": "object", "properties": {"title": {"type": "string"}}}, "wait_ms": 2500})
+        check("extract_structured call HTTP 200", code == 200, f"got {code}")
+        blob = tool_content(ev)
+        check("extract_structured returns ok/data", '"ok"' in blob, blob[:300])
 
         print("== error handling ==")
         code, ev = call_tool("extract_web", {"url": "not-a-url"})

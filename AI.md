@@ -294,22 +294,22 @@ internet.
 
 ## Installing the agent skill (ask the user first)
 
-The repo ships one skill file, `skills/search-extraction-combo.md`, that
-teaches the find -> read workflow. Each agent runtime stores skills in a
-different directory, so before installing it you MUST ask the user which
-agent they want it installed for. Do not guess - the wrong path fails silently
-or lands in another project's skill store.
+The repo ships one skill file, `skills/kitsune-mcp-usage.md`, that teaches the
+find -> read workflow plus Camoufox troubleshooting. Each agent runtime stores
+skills in a different directory, so before installing it you MUST ask the user
+which agent they want it installed for. Do not guess - the wrong path fails
+silently or lands in another project's skill store.
 
 Per-platform install paths:
 
 | Platform | Destination |
 |----------|-------------|
-| Hermes | `~/.hermes/skills/research/search-extraction-combo/SKILL.md` |
-| Claude Code | `.claude/skills/search-extraction-combo/SKILL.md` |
-| OpenCode | `.opencode/skills/search-extraction-combo/SKILL.md` |
+| Hermes | `~/.hermes/skills/kitsune-mcp-usage/SKILL.md` |
+| Claude Code | `.claude/skills/kitsune-mcp-usage/SKILL.md` |
+| OpenCode | `.opencode/skills/kitsune-mcp-usage/SKILL.md` |
 
 After copying, verify the frontmatter (`name` + `description`) parses and the
-file is byte-identical to `skills/search-extraction-combo.md`. Keep the
+file is byte-identical to `skills/kitsune-mcp-usage.md`. Keep the
 frontmatter untouched - the skill only triggers if its `description` fits the
 agent's trigger index.
 

@@ -203,16 +203,17 @@ if [ -f verify_stack.py ]; then
 fi
 
 # --- 6. skill install (optional) -------------------------------------------
-if [ "$INSTALL_SKILL" -eq 1 ] && [ -f skills/search-extraction-combo.md ]; then
-  log "found agent skill: skills/search-extraction-combo.md"
-  echo "This repo ships a skill that teaches agents the find -> read workflow."
+if [ "$INSTALL_SKILL" -eq 1 ] && [ -f skills/kitsune-mcp-usage.md ]; then
+  log "found agent skill: skills/kitsune-mcp-usage.md"
+  echo "This repo ships a skill that teaches agents the find -> read workflow"
+  echo "plus troubleshooting (including the Camoufox persistence fix)."
   echo "It must be installed into YOUR agent's skill directory (paths differ per agent)."
   read -r -p "Install it now? [y/N] " ans
   case "$ans" in
     y|Y|yes|YES)
-      DEST="${HERMES_SKILL_DIR:-$HOME/.hermes/skills/research/search-extraction-combo}"
+      DEST="${HERMES_SKILL_DIR:-$HOME/.hermes/skills/kitsune-mcp-usage}"
       mkdir -p "$DEST"
-      cp skills/search-extraction-combo.md "$DEST/SKILL.md"
+      cp skills/kitsune-mcp-usage.md "$DEST/SKILL.md"
       ok "skill installed to $DEST/SKILL.md (Hermes default)."
       ok "For Claude Code / OpenCode see AI.md 'Install the skill file'."
       ;;

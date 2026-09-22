@@ -45,6 +45,9 @@ logger = logging.getLogger("mcp_kitsune")
 CAMOUFOX_BASE_URL = os.environ.get("CAMOUFOX_BASE_URL", "http://localhost:8091")
 CAMOUFOX_USER_ID = os.environ.get("CAMOUFOX_USER_ID", "hermes-agent")
 CAMOUFOX_SESSION_KEY = os.environ.get("CAMOUFOX_SESSION_KEY", "mcp-kitsune")
+# When True, generate a unique session key per request to avoid restoring
+# corrupted persisted profile state after a browser crash/timeout.
+CAMOUFOX_DISABLE_PERSISTENCE = os.environ.get("CAMOUFOX_DISABLE_PERSISTENCE", "false").lower() in ("1", "true", "yes", "on")
 # SearXNG search backend (in-stack DNS when running inside the same compose).
 SEARXNG_BASE_URL = os.environ.get("SEARXNG_BASE_URL", "http://searxng:8080")
 SEARXNG_TIMEOUT = float(os.environ.get("SEARXNG_TIMEOUT", "15"))
@@ -136,11 +139,30 @@ EXTRACT_TEXT_JS = r"""
 class CamoufoxClient:
     """Thin async HTTP client for the Camoufox REST API (per openapi.json v1.13)."""
 
+    # Errors that indicate the Camoufox session is poisoned (corrupted profile
+    # state, stale tab references after a browser restart, etc.). When these
+    # surface, we reset the session and retry rather than propagating the HTTP
+    # 500 back to the caller.
+    _RECOVERABLE_STATUS = {500, 404}
+
     def __init__(self, base_url: str, user_id: str, session_key: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.user_id = user_id
         self.session_key = session_key
         self._client = httpx.AsyncClient(timeout=HTTP_TIMEOUT)
+
+    def _fresh_session_key(self) -> str:
+        """Generate a unique session key so Camoufox uses a fresh profile.
+
+        When persistence is enabled, Camoufox restores the stored storage-state.json
+        for the given session key. If that state is corrupted (from a prior timeout),
+        tab creation hangs forever. A unique key forces a new profile directory and
+        bypasses the broken persisted state entirely.
+        """
+        if CAMOUFOX_DISABLE_PERSISTENCE:
+            import uuid
+            return f"{self.session_key}-req-{uuid.uuid4().hex[:12]}"
+        return self.session_key
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -153,11 +175,62 @@ class CamoufoxClient:
             return {}
         return resp.json()
 
+    async def reset_session(self) -> None:
+        """Delete the Camoufox user session so the next request starts fresh.
+
+        This clears persisted storage state (cookies, tabs, broken profiles)
+        that can corrupt subsequent tab-creation attempts after a timeout or
+        browser restart. Safe to call even if no session exists.
+        """
+        logger.info("resetting Camoufox session for user %s", self.user_id)
+        await self.close_session()
+        # Brief pause to let Camoufox tear down the browser context cleanly
+        await asyncio.sleep(0.5)
+
+    async def _with_retry(self, operation, max_attempts: int = 3, retry_delay: float = 1.0) -> Any:
+        """Execute an async operation with automatic session-reset retry.
+
+        When Camoufox returns HTTP 500 (tab creation timeout, browser crash)
+        or HTTP 404 (stale tab reference after an internal browser restart),
+        the session state is likely poisoned. This wrapper detects those
+        statuses, resets the session, and retries the operation.
+
+        Without this, a single timeout cascades into permanent HTTP 500s
+        until the container is manually restarted.
+        """
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await operation()
+            except RuntimeError as exc:
+                last_error = exc
+                error_msg = str(exc)
+                # Check if this is a recoverable HTTP error (500 or 404)
+                is_recoverable = any(f"-> HTTP {code}:" in error_msg for code in self._RECOVERABLE_STATUS)
+                if not is_recoverable or attempt >= max_attempts:
+                    raise
+                logger.warning(
+                    "Camoufox request failed (attempt %d/%d): %s — resetting session and retrying",
+                    attempt, max_attempts, error_msg,
+                )
+                await self.reset_session()
+                # Generate a fresh session key to avoid restoring corrupted
+                # persisted storage state from the previous attempt
+                if CAMOUFOX_DISABLE_PERSISTENCE:
+                    import uuid
+                    self.session_key = f"{self.session_key.split('-req-')[0]}-req-{uuid.uuid4().hex[:12]}"
+                await asyncio.sleep(retry_delay)
+        if last_error:
+            raise last_error
+
     async def start_browser(self) -> dict[str, Any]:
         return await self._request("POST", "/start")
 
     async def create_tab(self, url: str | None = None) -> str:
-        payload: dict[str, Any] = {"userId": self.user_id, "sessionKey": self.session_key}
+        # Use a unique session key per tab creation when persistence is disabled,
+        # so Camoufox never restores corrupted storage state from a prior crash.
+        session_key = self._fresh_session_key() if CAMOUFOX_DISABLE_PERSISTENCE else self.session_key
+        payload: dict[str, Any] = {"userId": self.user_id, "sessionKey": session_key}
         if url:
             payload["url"] = url
         data = await self._request("POST", "/tabs", json=payload)
@@ -219,6 +292,29 @@ class CamoufoxClient:
             return {"error": "evaluate did not return a JSON string", "raw": result}
         finally:
             await self.close_tab(tab_id)
+
+    async def get_page_text_safe(self, url: str, wait_ms: int = 3000) -> dict[str, Any]:
+        """Same as get_page_text but with automatic session-reset retry.
+
+        On HTTP 500/404 (tab creation timeout, stale tab after browser restart),
+        resets the Camoufox session and retries once. This prevents the
+        cascading-failure pattern where one timeout poisons all subsequent requests.
+        """
+        async def _do_get_page_text():
+            await self.start_browser()
+            tab_id = await self.create_tab()
+            try:
+                await self.navigate(tab_id, url)
+                if wait_ms > 0:
+                    await asyncio.sleep(wait_ms / 1000.0)
+                result = await self.evaluate(tab_id, EXTRACT_TEXT_JS)
+                if isinstance(result, str):
+                    return json.loads(result)
+                return {"error": "evaluate did not return a JSON string", "raw": result}
+            finally:
+                await self.close_tab(tab_id)
+
+        return await self._with_retry(_do_get_page_text, max_attempts=3, retry_delay=1.5)
 
 
 class DocsMcpClient:
@@ -317,7 +413,7 @@ async def extract_web(url: str, wait_ms: int = 3000, max_chars: int = 20000, max
     """
     _validate_url(url)
     try:
-        data = await get_client().get_page_text(url, wait_ms=wait_ms)
+        data = await get_client().get_page_text_safe(url, wait_ms=wait_ms)
     except Exception as exc:
         return {"error": f"extract failed: {exc}", "url": url}
     if "error" in data:
@@ -459,15 +555,17 @@ async def extract_structured(
     _validate_url(url)
     client = get_client()
     try:
-        await client.start_browser()
-        tab_id = await client.create_tab()
-        try:
-            await client.navigate(tab_id, url)
-            if wait_ms > 0:
-                await asyncio.sleep(wait_ms / 1000.0)
-            return await client.extract(tab_id, schema)
-        finally:
-            await client.close_tab(tab_id)
+        async def _do_extract_structured():
+            await client.start_browser()
+            tab_id = await client.create_tab()
+            try:
+                await client.navigate(tab_id, url)
+                if wait_ms > 0:
+                    await asyncio.sleep(wait_ms / 1000.0)
+                return await client.extract(tab_id, schema)
+            finally:
+                await client.close_tab(tab_id)
+        return await client._with_retry(_do_extract_structured, max_attempts=3, retry_delay=1.5)
     except Exception as exc:
         return {"error": f"structured extract failed: {exc}", "url": url}
 
@@ -482,21 +580,23 @@ async def browser_snapshot(url: str, wait_ms: int = 3000) -> dict[str, Any]:
     _validate_url(url)
     client = get_client()
     try:
-        await client.start_browser()
-        tab_id = await client.create_tab()
-        try:
-            await client.navigate(tab_id, url)
-            if wait_ms > 0:
-                await asyncio.sleep(wait_ms / 1000.0)
-            snap = await client.snapshot(tab_id)
-            return {
-                "url": snap.get("url", url),
-                "snapshot": snap.get("snapshot", ""),
-                "refsCount": snap.get("refsCount", 0),
-                "truncated": snap.get("truncated", False),
-            }
-        finally:
-            await client.close_tab(tab_id)
+        async def _do_browser_snapshot():
+            await client.start_browser()
+            tab_id = await client.create_tab()
+            try:
+                await client.navigate(tab_id, url)
+                if wait_ms > 0:
+                    await asyncio.sleep(wait_ms / 1000.0)
+                snap = await client.snapshot(tab_id)
+                return {
+                    "url": snap.get("url", url),
+                    "snapshot": snap.get("snapshot", ""),
+                    "refsCount": snap.get("refsCount", 0),
+                    "truncated": snap.get("truncated", False),
+                }
+            finally:
+                await client.close_tab(tab_id)
+        return await client._with_retry(_do_browser_snapshot, max_attempts=3, retry_delay=1.5)
     except Exception as exc:
         return {"error": f"snapshot failed: {exc}", "url": url}
 
