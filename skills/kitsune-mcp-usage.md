@@ -1,7 +1,7 @@
 ---
 name: kitsune-mcp-usage
 description: "Complete guide to kitsune MCP tools — search, extract, scrape, debug. Includes web research workflow, docs lookup, Camoufox persistence fix, and common pitfalls."
-version: 1.1.0
+version: 1.2.0
 license: MIT
 platforms: [linux, macos, windows]
 metadata:
@@ -104,9 +104,11 @@ Renders a URL in a browser (Camoufox) and extracts content. Better for JS-heavy 
 
 ⚠️ **Camoufox profile corruption bug:** If the container has been running with intermittent tab-creation timeouts, the persisted profile state at `/root/.camofox/profiles/*` becomes corrupted, causing cascading `extract_*` failures. Symptoms in logs: `tab create timed out after 30000ms`, `new page timed out after 10000ms`, `new_page_unresponsive`, `HTTP 500: Tab not found`.
 
-**Fix:** The server patch now handles this automatically. Set `CAMOUFOX_DISABLE_PERSISTENCE=true` in the `mcp` service's environment in `docker-compose.yml` to generate a unique session key per request, bypassing corrupted profile state entirely. The `_with_retry()` wrapper in `server.py` handles session resets on HTTP 500/404 automatically (up to 3 attempts).
+**Fix (two layers):** As of Camoufox v1.17.0, this bug is **fixed upstream** — v1.15.0+ isolates session timeouts so a single tab failure doesn't poison the whole session, and v1.17.0 adds session-rebuild on create-tab timeout. The `docker-compose.yml` and Dockerfile have been updated to v1.17.0.
 
-If you need to clear manually (for debugging):
+The `_with_retry()` wrapper in `server.py` remains as defense-in-depth — it detects HTTP 500/404 errors, resets the Camoufox session via `DELETE /sessions`, and retries (up to 3 attempts with 1.5s backoff). This catches the rare transient browser restart without requiring manual intervention.
+
+If you ever hit this on an older version (pre-v1.15.0):
 ```bash
 docker exec mcpkitsune-camofox rm -rf /root/.camofox/profiles/*
 docker restart mcpkitsune-camofox
@@ -167,7 +169,7 @@ docker compose run --rm -e DOCS_SEED_MAX_PAGES=400 \
 - **Missing required argument error**: Use `tool_describe` to get the exact schema
 - **Empty `search failed:` error from `search_web`**: SearXNG backend is down — check containers
 - **Library not found in `search_docs`**: Call `list_libraries` first to discover valid names
-- **`extract_web` returning `Camoufox API POST /tabs -> HTTP 500`**: Camoufox profile corruption — the server's `_with_retry()` should handle this automatically by resetting the session. If it still fails, ensure `CAMOUFOX_DISABLE_PERSISTENCE=true` is set in `docker-compose.yml` for the `mcp` service, then clear `/root/.camofox/profiles/*` and restart container (see Camoufox bug above)
+- **`extract_web` returning `Camoufox API POST /tabs -> HTTP 500`**: Camoufox profile corruption — on v1.17.0 this is fixed upstream. The server's `_with_retry()` wraps HTTP 500/404 with automatic session reset and retry. If it still fails, clear `/root/.camofox/profiles/*` and restart container (see Camoufox bug above)
 - **`fetch_url` returning `docs fetch failed:`**: docs sidecar container is down or unresponsive — check `docker ps` and container health
 - **`extract_structured` returning HTTP 400**: Schema is invalid — must be `{"type": "object", "properties": {...}}`
 

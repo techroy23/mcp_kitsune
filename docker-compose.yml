@@ -39,12 +39,12 @@ services:
       context: .
       dockerfile: docker/camofox/Dockerfile
       args:
-        CAMOUFOX_VERSION: ${CAMOUFOX_VERSION:-135.0.1}
-        CAMOUFOX_RELEASE: ${CAMOUFOX_RELEASE:-beta.24}
-        # Upstream camofox-browser git tag to clone (npm v1.13.1 = tag v1.13.1).
+        CAMOUFOX_VERSION: ${CAMOUFOX_VERSION:-152.0.4}
+        CAMOFOX_RELEASE: ${CAMOUFOX_RELEASE:-beta.28}
+        # Upstream camofox-browser git tag to clone (npm v1.17.0 = tag v1.17.0).
         # Pin it so builds are deterministic (do not follow upstream main).
-        CAMOFOX_UPSTREAM_TAG: ${CAMOFOX_UPSTREAM_TAG:-v1.13.1}
-    image: mcpkitsune-camofox:${CAMOUFOX_VERSION:-135.0.1}
+        CAMOFOX_UPSTREAM_TAG: ${CAMOFOX_UPSTREAM_TAG:-v1.17.0}
+    image: mcpkitsune-camofox:${CAMOUFOX_VERSION:-152.0.4}
     container_name: mcpkitsune-camofox
     restart: unless-stopped
     shm_size: 2g
@@ -126,10 +126,6 @@ services:
       CAMOUFOX_BASE_URL: "http://camofox:9377"
       CAMOUFOX_USER_ID: "hermes-agent"
       CAMOUFOX_SESSION_KEY: "mcp-kitsune"
-      # Disable session state persistence to avoid corrupted profile cascades.
-      # When enabled, each tab creation uses a unique session key so Camoufox
-      # never restores a broken storage-state.json from a prior crash.
-      CAMOUFOX_DISABLE_PERSISTENCE: "true"
       MCP_HOST: "0.0.0.0"
       MCP_PORT: "8095"
       MCP_ALLOWED_HOSTS: "*"

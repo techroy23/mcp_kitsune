@@ -288,6 +288,12 @@ internet.
 - **search_docs fails with a library error** - the docs index is empty or lacks
   that library. Index it (see "Indexing library docs"). If search_docs/fetch_url
   fail with a connection error, the docs sidecar is down: `docker compose logs docs`.
+- **extract_web returns `Camoufox API POST /tabs -> HTTP 500`** - on v1.17.0 this
+  is fixed upstream (v1.15.0+ isolates session timeouts). The `_with_retry()`
+  wrapper in server.py auto-resets the session on 500/404 and retries 3x. If it
+  still fails on an older version, clear profiles: `docker exec
+  mcpkitsune-camofox rm -rf /root/.camofox/profiles/* && docker restart
+  mcpkitsune-camofox`
 - **docs image is large / slow first pull** - normal, the docs-mcp-server
   image is ~2.7 GB. Skip it entirely with `install.sh --no-docs` if you do not
   need the docs tools.

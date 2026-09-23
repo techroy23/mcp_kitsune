@@ -45,9 +45,10 @@ logger = logging.getLogger("mcp_kitsune")
 CAMOUFOX_BASE_URL = os.environ.get("CAMOUFOX_BASE_URL", "http://localhost:8091")
 CAMOUFOX_USER_ID = os.environ.get("CAMOUFOX_USER_ID", "hermes-agent")
 CAMOUFOX_SESSION_KEY = os.environ.get("CAMOUFOX_SESSION_KEY", "mcp-kitsune")
-# When True, generate a unique session key per request to avoid restoring
-# corrupted persisted profile state after a browser crash/timeout.
-CAMOUFOX_DISABLE_PERSISTENCE = os.environ.get("CAMOUFOX_DISABLE_PERSISTENCE", "false").lower() in ("1", "true", "yes", "on")
+# Note: As of Camoufox v1.15.0+, the persistence-corruption bug (where a tab
+# creation timeout corrupts storage-state.json and cascades into permanent
+# HTTP 500s) is fixed upstream. The _with_retry() wrapper below remains as
+# defense-in-depth for transient browser restarts.
 # SearXNG search backend (in-stack DNS when running inside the same compose).
 SEARXNG_BASE_URL = os.environ.get("SEARXNG_BASE_URL", "http://searxng:8080")
 SEARXNG_TIMEOUT = float(os.environ.get("SEARXNG_TIMEOUT", "15"))
@@ -151,19 +152,6 @@ class CamoufoxClient:
         self.session_key = session_key
         self._client = httpx.AsyncClient(timeout=HTTP_TIMEOUT)
 
-    def _fresh_session_key(self) -> str:
-        """Generate a unique session key so Camoufox uses a fresh profile.
-
-        When persistence is enabled, Camoufox restores the stored storage-state.json
-        for the given session key. If that state is corrupted (from a prior timeout),
-        tab creation hangs forever. A unique key forces a new profile directory and
-        bypasses the broken persisted state entirely.
-        """
-        if CAMOUFOX_DISABLE_PERSISTENCE:
-            import uuid
-            return f"{self.session_key}-req-{uuid.uuid4().hex[:12]}"
-        return self.session_key
-
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -214,11 +202,6 @@ class CamoufoxClient:
                     attempt, max_attempts, error_msg,
                 )
                 await self.reset_session()
-                # Generate a fresh session key to avoid restoring corrupted
-                # persisted storage state from the previous attempt
-                if CAMOUFOX_DISABLE_PERSISTENCE:
-                    import uuid
-                    self.session_key = f"{self.session_key.split('-req-')[0]}-req-{uuid.uuid4().hex[:12]}"
                 await asyncio.sleep(retry_delay)
         if last_error:
             raise last_error
@@ -227,10 +210,7 @@ class CamoufoxClient:
         return await self._request("POST", "/start")
 
     async def create_tab(self, url: str | None = None) -> str:
-        # Use a unique session key per tab creation when persistence is disabled,
-        # so Camoufox never restores corrupted storage state from a prior crash.
-        session_key = self._fresh_session_key() if CAMOUFOX_DISABLE_PERSISTENCE else self.session_key
-        payload: dict[str, Any] = {"userId": self.user_id, "sessionKey": session_key}
+        payload: dict[str, Any] = {"userId": self.user_id, "sessionKey": self.session_key}
         if url:
             payload["url"] = url
         data = await self._request("POST", "/tabs", json=payload)
@@ -259,6 +239,10 @@ class CamoufoxClient:
         return data.get("result")
 
     async def extract(self, tab_id: str, schema: dict[str, Any]) -> dict[str, Any]:
+        # Camoufox v1.17.0 requires a snapshot to be taken first so the
+        # ref table is populated -- otherwise /extract returns 409.
+        # This call also implicitly waits for the page to settle.
+        await self.snapshot(tab_id)
         data = await self._request(
             "POST", f"/tabs/{tab_id}/extract",
             json={"userId": self.user_id, "schema": schema},
@@ -347,16 +331,18 @@ class DocsMcpClient:
                     f"docs-mcp-server {tool_name} -> HTTP {resp.status_code}: {resp.text[:300]}"
                 )
             # docs-mcp-server responds with SSE framing even to POST (event:
-            # message\\ndata: {json}). Strip the event/data envelope before parse.
+            # message\\ndata: {json}). A single response may contain multiple
+            # data lines -- collect all of them and parse the last (the result).
             text = resp.text
             if text.lstrip().startswith("event:"):
-                data_line = next(
-                    (line[5:].strip() for line in text.splitlines() if line.startswith("data:")),
-                    None,
-                )
-                if data_line is None:
+                data_lines = [
+                    line[5:].strip()
+                    for line in text.splitlines()
+                    if line.startswith("data:")
+                ]
+                if not data_lines:
                     raise RuntimeError(f"docs-mcp-server {tool_name}: SSE without data line")
-                data = json.loads(data_line)
+                data = json.loads(data_lines[-1])
             else:
                 data = resp.json()
         # Extract the text content array from the MCP result envelope.
